@@ -1,0 +1,30 @@
+
+
+Small miners:
+	Frigates: Venture
+	Navy Faction Frigates: Venture Consortium Issue
+	Expedition Frigates: Prospect, Endurance
+	Destroyers: Pioneer
+	Navy Faction Destroyers: Perseverance, Pioneer Consortium Issue
+	Command Destroyers: Outrider
+
+Big miners:
+	Mining Barges: Covetor, Retriever, Procurer
+	Exhumers: Hulk, Machinaw, Skiff
+	Industrial Command Ships: Porpoise, Orca
+	Capital Industrial Ships: Rorqual
+
+Haulers:
+	
+	Other: Noctis
+	Freighters: Bowhead
+
+Capitals:
+
+Combat ships:
+	everything else
+
+other:
+	Corvettes: Impairor, Ibis, Velator, Reaper
+	Shuttles: <all>
+	Special Edition Ships: <all>
