@@ -1,0 +1,35 @@
+# Attacker ship buckets -> SDE ids. Parsed into killmails.attacker_bucket (type_id -> bucket).
+#
+# Per non-comment line:  <Bucket name> = <selector>
+#   group <id>        one SDE ship group_id (expands to all its published hulls)
+#   groups <id ...>   several group_ids merged into one bucket
+#   type <id>         one hull type_id
+#   rest              catch-all: every hull not claimed by any other bucket
+# A `+` bucket (single hull) overrides that hull's group, so Pacifier is its own bucket
+# even though it lives in the Covert Ops group.
+
+# Block 1 -- specific classes, each its own bucket:
+Stealth Bombers             = group 834
+Covert Ops                  = group 830
+Force Recon Ship            = group 833
+Combat Recon Ship           = group 906     # d-scan invisible
+Strategic Cruiser           = group 963
+Black Ops                   = group 898
+Interdictors                = group 541
+Heavy Interdiction Cruisers = group 894
++Metamorphosis              = type 77114
++Pacifier                   = type 44993    # in Covert Ops (830); extracted here
++Astero                     = type 33468    # in Frigate (25)
++Stratios                   = type 33470    # in Cruiser (26)
++Cenotaph                   = type 85086    # in Combat Battlecruiser (419)
++Tholos                     = type 85087    # in Destroyer (420)
++Odysseus                   = type 89607    # in Expedition Command Ship (4902)
+
+# Block 2 -- size classes (t1 + faction + t2 [+ t3] combined, not split):
+Frigates        = groups 25 324 831 893 1527        # Frigate, Assault, Interceptor, EAS, Logi Frigate
+Destroyers      = groups 420 1534 1305              # Destroyer, Command Destroyer, Tactical (T3)
+Cruisers        = groups 26 358 832 1972            # Cruiser, HAC, Logistics, Flag Cruiser (Monitor)
+Battlecruisers  = groups 419 1201 540               # Combat BC, Attack BC, Command Ship
+Battleships     = groups 27 900                     # Battleship, Marauder
+Capitals        = groups 30 485 4594 547 5120 659 1538   # Titan, Dread, Lancer Dread, Carrier, Cmd Carrier, Super, FAX
+Others          = rest                              # haulers, mining, shuttles, corvettes, capsules, freighters, Rorqual, blockade runners, expedition frigates, ...

@@ -1,30 +1,25 @@
+# Victim ship buckets -> SDE ids. Parsed into killmails.victim_bucket (type_id -> bucket).
+# Role-based: what the victim was flying when killed. Same syntax as attacker_ship_groups.txt:
+#   group/groups <id...>   SDE ship group_id(s) (expand to all published hulls)
+#   type/types  <id...>    specific hull type_id(s)
+#   rest                   catch-all
+# A specific type overrides its group (e.g. Venture is "Small miners", not the generic
+# Frigate group). A bucket may span several lines and mix groups + types.
 
+Small miners  = group 1283                           # Expedition Frigates: Prospect, Endurance
+Small miners  = types 32880 89648                    # Ventures: Venture, Venture Consortium Issue
+Small miners  = types 89240 91174 89647              # mining Destroyers: Pioneer, Perseverance, Pioneer CI
+Small miners  = type 89649                           # Outrider (ORE Command Destroyer)
 
-Small miners:
-	Frigates: Venture
-	Navy Faction Frigates: Venture Consortium Issue
-	Expedition Frigates: Prospect, Endurance
-	Destroyers: Pioneer
-	Navy Faction Destroyers: Perseverance, Pioneer Consortium Issue
-	Command Destroyers: Outrider
+Big miners    = groups 463 543 941 883               # Mining Barge, Exhumer, Industrial Cmd Ship, Rorqual
 
-Big miners:
-	Mining Barges: Covetor, Retriever, Procurer
-	Exhumers: Hulk, Machinaw, Skiff
-	Industrial Command Ships: Porpoise, Orca
-	Capital Industrial Ships: Rorqual
+Haulers       = groups 28 380 1202 513 902           # Hauler (incl. Noctis), DST, Blockade Runner, Freighter, Jump Freighter
 
-Haulers:
-	
-	Other: Noctis
-	Freighters: Bowhead
+Explorers     = types 29248 605 607 586              # explorer Frigates: Magnate, Heron, Imicus, Probe
+Explorers     = types 72907 72904 72913 72903        # Navy versions of the above
+Explorers     = types 11188 11192 11182 11172 44993  # Covert Ops: Anathema, Buzzard, Cheetah, Helios, Pacifier
+Explorers     = types 33468 77114 33472 89607        # Astero, Metamorphosis, Nestor, Odysseus
 
-Capitals:
+Other         = groups 237 31 5087                   # Corvettes, Shuttles, Special Edition Yachts
 
-Combat ships:
-	everything else
-
-other:
-	Corvettes: Impairor, Ibis, Velator, Reaper
-	Shuttles: <all>
-	Special Edition Ships: <all>
+Combat ships  = rest                                 # everything else: combat hulls, other capitals, logi, command, ewar, ...

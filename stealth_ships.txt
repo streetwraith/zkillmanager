@@ -1,0 +1,21 @@
+
+Groups:
+	Strategic Cruiser	963
+	Covert Ops	830
+	Force Recon Ship	833
+	Stealth Bomber	834
+	Blockade Runner	1202
+	Special Edition Yachts	5087
+	
+Ships:
+	Etana	32790
+	Astero	33468
+	Stratios	33470
+	Stratios Emergency Responder	33553
+	Victorieux Luxury Yacht	34590
+	Prospect	33697
+	Rabisu	42245
+	Metamorphosis	77114
+	Tholos	85087
+	Cenotaph	85086
+	Odysseus	89607

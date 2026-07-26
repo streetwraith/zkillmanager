@@ -1,0 +1,7 @@
+# built binary
+/zkillmanager
+# test binaries / coverage
+*.test
+*.out
+# local env
+.env
