@@ -28,22 +28,28 @@ type DumpProgressStore interface {
 	SetDumpProgress(ctx context.Context, day time.Time, total int) error
 }
 
+// PodPairer flags "finished the pod" attackers and deletes processed pods (*store.Store).
+type PodPairer interface {
+	PairPods(ctx context.Context) (int, error)
+}
+
 // Syncer keeps the local store in step with zKillboard's daily dumps by comparing
 // totals.json against the totals recorded at our last pull and re-pulling the biggest-gap
 // days. This unifies backfill (a fresh DB has every day at "full gap") and daily
 // reconciliation (the few days that grew since, including late submissions on old days).
 type Syncer struct {
-	mu        sync.Mutex // serializes overlapping Sync calls (backfill vs scheduled reconcile)
+	mu        sync.Mutex // serializes Sync and pod pairing (must not overlap a bulk day insert)
 	totals    TotalsFetcher
 	fetcher   DayFetcher
 	ingester  *Ingester
 	progress  DumpProgressStore
+	pods      PodPairer
 	retention int
 	log       *slog.Logger
 }
 
-func NewSyncer(totals TotalsFetcher, fetcher DayFetcher, ingester *Ingester, progress DumpProgressStore, retentionDays int, log *slog.Logger) *Syncer {
-	return &Syncer{totals: totals, fetcher: fetcher, ingester: ingester, progress: progress, retention: retentionDays, log: log}
+func NewSyncer(totals TotalsFetcher, fetcher DayFetcher, ingester *Ingester, progress DumpProgressStore, pods PodPairer, retentionDays int, log *slog.Logger) *Syncer {
+	return &Syncer{totals: totals, fetcher: fetcher, ingester: ingester, progress: progress, pods: pods, retention: retentionDays, log: log}
 }
 
 // Sync re-pulls the biggest-gap days within the retention window, up to limit (<= 0 =
@@ -118,4 +124,18 @@ func (s *Syncer) Sync(ctx context.Context, limit int) (int, error) {
 		}
 	}
 	return pulled, nil
+}
+
+// PairPods runs the pod-pairing pass under the same lock as Sync. Pairing deletes a pod once
+// it has been matched to its ship kill; a bulk day insert (backfill/reconcile) writes ship
+// kills and pods in arbitrary order, so pairing concurrently could delete a pod before its
+// ship kill exists and lose the pairing for good. Holding the lock keeps them from
+// overlapping; a skipped pass just runs next tick.
+func (s *Syncer) PairPods(ctx context.Context) (int, error) {
+	if !s.mu.TryLock() {
+		s.log.Info("sync in progress, skipping pod pairing")
+		return 0, nil
+	}
+	defer s.mu.Unlock()
+	return s.pods.PairPods(ctx)
 }

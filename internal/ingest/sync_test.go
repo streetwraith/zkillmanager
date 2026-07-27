@@ -57,10 +57,22 @@ func (f *recordingFetcher) FetchDay(_ context.Context, day time.Time) (map[int64
 	return map[int64]zkill.Killmail{}, nil
 }
 
+type fakePodPairer struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (f *fakePodPairer) PairPods(context.Context) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	return 7, nil
+}
+
 func newSyncerFor(totals, recorded map[time.Time]int, fetcher *recordingFetcher, retention int) (*Syncer, *fakeProgress) {
 	prog := &fakeProgress{m: recorded}
 	ing := New(fakeResolver{ok: true}, &fakeWriter{}, discardLogger())
-	return NewSyncer(fakeTotals{totals}, fetcher, ing, prog, retention, discardLogger()), prog
+	return NewSyncer(fakeTotals{totals}, fetcher, ing, prog, &fakePodPairer{}, retention, discardLogger()), prog
 }
 
 func TestSyncSelectsBiggestGapsWithinWindow(t *testing.T) {
@@ -107,6 +119,35 @@ func TestSyncSelectsBiggestGapsWithinWindow(t *testing.T) {
 			t.Errorf("progress for the 404 day changed to %d, want 70 (unchanged)", prog.get(day(4)))
 		}
 	})
+}
+
+// PairPods must not run while a Sync holds the lock: a bulk day insert writes ship kills and
+// pods in arbitrary order, so pairing concurrently could delete a pod before its ship kill
+// lands. The pass skips and runs next tick instead.
+func TestPairPodsSkipsWhileSyncing(t *testing.T) {
+	pairer := &fakePodPairer{}
+	ing := New(fakeResolver{ok: true}, &fakeWriter{}, discardLogger())
+	s := NewSyncer(fakeTotals{}, &recordingFetcher{}, ing, &fakeProgress{m: map[time.Time]int{}}, pairer, 7, discardLogger())
+
+	s.mu.Lock() // stand in for an in-progress Sync
+	n, err := s.PairPods(context.Background())
+	s.mu.Unlock()
+	if err != nil {
+		t.Fatalf("PairPods while locked: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("pods paired = %d, want 0 (skipped)", n)
+	}
+	if pairer.calls != 0 {
+		t.Errorf("underlying pairer called %d times while syncing, want 0", pairer.calls)
+	}
+
+	if _, err := s.PairPods(context.Background()); err != nil {
+		t.Fatalf("PairPods unlocked: %v", err)
+	}
+	if pairer.calls != 1 {
+		t.Errorf("underlying pairer called %d times when free, want 1", pairer.calls)
+	}
 }
 
 func TestSyncRespectsLimit(t *testing.T) {

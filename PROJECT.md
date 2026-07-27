@@ -48,16 +48,23 @@ with `context` + `errgroup`:
 
 - **R2Z2 live tail** — polls the ephemeral sequence feed for live killmails; resumes from
   the stored sequence on restart.
-- **Internal scheduler** — hourly poll for the new daily dump, the gap-based reconciliation
-  `Sync` (catches late submissions on *any* day), and retention prune.
+- **Internal scheduler** — hourly poll for the new daily dump + the gap-based reconciliation
+  `Sync` (catches late submissions on *any* day), a pod-pairing pass every few minutes, and
+  retention prune.
+- **Pod pairing** — pods (capsules) are ingested normally, then a periodic pass pairs each pod
+  older than 15 min with the ship kill it followed, sets `kills.with_pod` on the pilots who were
+  on *both* mails, and deletes the pod (cascading its `kills` rows), so pods aren't retained. It
+  runs through the `Syncer`'s lock so it never overlaps a bulk day insert (which writes ship
+  kills and pods in arbitrary order) and mispairs. This is the one place a stored row mutates
+  after insert (`with_pod`), a deliberate trade for not storing ~28% more killmails.
 - **Backfill / sync** — one gap-driven `Sync`: compare `totals.json` against `dump_progress`
   and re-pull the biggest-gap days (~10s apart). Backfill is `Sync` with no limit on first
   boot / `--backfill`; the daily job is the same `Sync` with a small limit. Resumable via
   `dump_progress`.
 - **`/healthz`** — for Coolify health checks.
 
-All writes are `INSERT ... ON CONFLICT (killmail_id) DO NOTHING`, so dumps / live feed /
-backfill overlap harmlessly.
+All ingest writes are `INSERT ... ON CONFLICT (killmail_id) DO NOTHING`, so dumps / live feed /
+backfill overlap harmlessly. (Pod pairing is the one non-insert write path; see below.)
 
 **Ingest filter (PvP only):** a killmail is stored only when the victim is a player
 (`victim.character_id` present) *and* at least one attacker is a player. This drops NPC-only
@@ -142,6 +149,9 @@ CREATE TABLE killmails.zkillboard_killmails (
 );
 CREATE INDEX zkb_killmails_time_brin   ON killmails.zkillboard_killmails USING BRIN (killmail_time);
 CREATE INDEX zkb_killmails_victim_time ON killmails.zkillboard_killmails (victim_char_id, killmail_time DESC); -- losses
+-- partial index for the pod-pairing pass (capsule victims only)
+CREATE INDEX zkb_killmails_pods ON killmails.zkillboard_killmails (killmail_time)
+    WHERE victim_ship_type_id IN (670, 33328);
 
 -- attackers only; the inverted index that turns per-pilot lookups into a range scan.
 -- one row per player attacker per kill.
@@ -159,9 +169,12 @@ CREATE TABLE killmails.kills (
     attacker_count       INT NOT NULL,        -- player attackers, for avg gang size (solo = count 1)
     attacker_corp_id     BIGINT,              -- attacker affiliation at kill time (historical snapshot)
     attacker_alliance_id BIGINT,
+    with_pod             BOOLEAN NOT NULL DEFAULT false, -- this pilot also podded the victim (set by pod pairing)
     PRIMARY KEY (character_id, killmail_id)
 );
 CREATE INDEX kills_char_time ON killmails.kills (character_id, killmail_time DESC);
+-- lookup by killmail_id (pod pairing's flag + the FK cascade; also co-attacker reads)
+CREATE INDEX kills_killmail  ON killmails.kills (killmail_id);
 
 -- custom, independent ship classifications; edited freely, joined at read
 CREATE TABLE killmails.attacker_bucket (type_id INT PRIMARY KEY, bucket TEXT NOT NULL);
@@ -208,7 +221,9 @@ region = "J-Space", constellation = the class (`C2`, ...), system = the J-code, 
 `region_id → map_regions`. Bucket seed data: `attacker_ship_groups.txt` +
 `victim_ship_groups.txt` (both complete; `group/groups/type/types/rest` grammar, "specific
 type overrides its group") are seeded into `attacker_bucket` / `victim_bucket` by
-`migrations/0002_seed_ship_buckets.sql` (groups expand from `sde` at apply time). Retention
+`migrations/0002_seed_ship_buckets.sql` (groups expand from `sde` at apply time);
+`migrations/0004_seed_deployables.sql` adds every published Deployable (SDE category 22) to
+`victim_bucket` as `Deployables`. Retention
 (e.g. 90d / 1y) is a pruning choice, not correctness; consider monthly RANGE partitions on
 `killmail_time` so pruning is a partition `DROP`.
 

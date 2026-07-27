@@ -5,8 +5,9 @@ Postgres store, so read-only consumers — primarily **lscan** (the threat-profi
 `/home/eve/lscan`) — can query and aggregate them without hitting zKillboard/ESI on their
 request path.
 
-- **What it does:** backfill + daily raw dumps + an R2Z2 live tail → an immutable,
-  append-only store of **player-vs-player** killmails, keyed by `killmail_id`.
+- **What it does:** backfill + daily raw dumps + an R2Z2 live tail → a windowed store of
+  **player-vs-player** killmails, keyed by `killmail_id` (immutable except a post-ingest
+  pod-pairing flag; pods themselves aren't retained).
 - **Stack:** Go (single long-running service with an internal scheduler), Postgres,
   deployed on Coolify.
 
@@ -25,7 +26,8 @@ reconciliation = biggest gaps, from `totals.json` vs `dump_progress`); and the l
 ephemeral tail — all wired via `errgroup` with graceful shutdown behind an internal `/healthz`.
 Stealth hulls are materialized into `killmails.stealth_ship` (from `stealth_ships.txt`,
 expanded via the SDE) and joined at read. The internal scheduler runs hourly reconciliation
-(picks up new/grown dumps) + a daily retention prune. Design + schema in `PROJECT.md`.
+(picks up new/grown dumps), a pod-pairing pass every few minutes (sets `kills.with_pod`, then
+drops the pod), and a daily retention prune. Design + schema in `PROJECT.md`.
 
 ## Build & test
 

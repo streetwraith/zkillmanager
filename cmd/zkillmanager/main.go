@@ -112,10 +112,11 @@ func run(ctx context.Context, backfill bool) error {
 	// One Syncer, shared by the scheduler's reconciliation and the optional backfill
 	// (its TryLock keeps them from overlapping).
 	hist := zkill.NewHistory(cfg.HistoryBaseURL, cfg.UserAgent)
-	syncer := ingest.NewSyncer(hist, hist, ingester, st, cfg.RetentionDays, slog.Default())
+	syncer := ingest.NewSyncer(hist, hist, ingester, st, st, cfg.RetentionDays, slog.Default())
 
-	// Internal scheduler: hourly reconciliation (picks up new/grown dumps) + retention prune.
-	sch := scheduler.New(cfg, syncer, st, slog.Default())
+	// Internal scheduler: hourly reconciliation (picks up new/grown dumps), pod pairing, and
+	// retention prune. Pairing goes through the syncer so it never overlaps a bulk day insert.
+	sch := scheduler.New(cfg, syncer, syncer, st, slog.Default())
 	g.Go(func() error { return sch.Run(ctx) })
 
 	if backfill || cfg.BackfillOnStart {
@@ -126,6 +127,14 @@ func run(ctx context.Context, backfill bool) error {
 			switch {
 			case err == nil:
 				slog.Info("backfill complete", "days", n)
+				// Pairing is deferred for the whole backfill (it shares the Sync lock), so a
+				// large backlog piles up; drain it now instead of waiting for the next tick.
+				switch pods, perr := syncer.PairPods(ctx); {
+				case perr == nil && pods > 0:
+					slog.Info("post-backfill pod pairing", "deleted", pods)
+				case perr != nil && !errors.Is(perr, context.Canceled):
+					slog.Error("post-backfill pod pairing failed; scheduler will retry", "err", perr)
+				}
 			case errors.Is(err, context.Canceled):
 				// shutdown, not a failure
 			default:
