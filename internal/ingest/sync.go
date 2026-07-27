@@ -96,19 +96,21 @@ func (s *Syncer) Sync(ctx context.Context, limit int) (int, error) {
 			return pulled, err
 		}
 		n, err := s.ingester.Day(ctx, s.fetcher, g.day)
-		if errors.Is(err, zkill.ErrDumpNotFound) {
+		switch {
+		case errors.Is(err, zkill.ErrDumpNotFound):
 			s.log.Info("dump not published yet, skipping", "day", g.day.Format(dayLayout))
-			continue
-		}
-		if err != nil {
+		case err != nil:
 			return pulled, err
+		default:
+			if err := s.progress.SetDumpProgress(ctx, g.day, g.total); err != nil {
+				return pulled, err
+			}
+			s.log.Info("synced day", "day", g.day.Format(dayLayout), "killmails", n, "gap", g.delta)
+			pulled++
 		}
-		if err := s.progress.SetDumpProgress(ctx, g.day, g.total); err != nil {
-			return pulled, err
-		}
-		s.log.Info("synced day", "day", g.day.Format(dayLayout), "killmails", n, "gap", g.delta)
-		pulled++
 
+		// Space every remote attempt -- including a 404 skip -- so a run of missing
+		// dumps can't burst requests at R2.
 		select {
 		case <-ctx.Done():
 			return pulled, ctx.Err()
