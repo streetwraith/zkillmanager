@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -29,7 +30,14 @@ import (
 
 func main() {
 	backfill := flag.Bool("backfill", false, "run a one-shot backfill on start")
+	healthcheck := flag.Bool("healthcheck", false, "probe the local /healthz and exit 0 (healthy) or 1; for the container HEALTHCHECK")
 	flag.Parse()
+
+	// Handle -healthcheck before any config load: the container HEALTHCHECK runs this and it
+	// must not depend on DATABASE_URL/USER_AGENT being parseable.
+	if *healthcheck {
+		os.Exit(healthProbe())
+	}
 
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 
@@ -37,6 +45,35 @@ func main() {
 		slog.Error("fatal", "err", err)
 		os.Exit(1)
 	}
+}
+
+// healthProbe backs the container HEALTHCHECK. The distroless image has no shell or curl, so
+// the binary probes its own /healthz. HTTP_ADDR is read straight from the env (not via
+// config.Load, which requires DATABASE_URL/USER_AGENT), and only its port is used -- we always
+// dial 127.0.0.1 so a bind address like ":8080" or "0.0.0.0:8080" still resolves. Returns a
+// process exit code: 0 on HTTP 200, 1 on anything else.
+func healthProbe() int {
+	addr := os.Getenv("HTTP_ADDR")
+	if addr == "" {
+		addr = ":8080" // keep in sync with config.Load's default
+	}
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "healthcheck: invalid HTTP_ADDR %q: %v\n", addr, err)
+		return 1
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get("http://127.0.0.1:" + port + "/healthz")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "healthcheck: %v\n", err)
+		return 1
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "healthcheck: /healthz returned %s\n", resp.Status)
+		return 1
+	}
+	return 0
 }
 
 func run(ctx context.Context, backfill bool) error {
