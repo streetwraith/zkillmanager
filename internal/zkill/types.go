@@ -14,6 +14,10 @@ type Killmail struct {
 	Attackers     []Attacker `json:"attackers"`
 }
 
+// Victim is the loss side of a killmail. victim.items is deliberately NOT a field: it is
+// ~54% of a raw dump's bytes (median 16 items/kill) and decoding it into structs dominated
+// the backfill's per-day memory peak. Omitting it lets the JSON decoder skip it entirely --
+// do not add an Items field without an actual consumer.
 type Victim struct {
 	CharacterID   int64     `json:"character_id"`
 	CorporationID int64     `json:"corporation_id"`
@@ -21,7 +25,6 @@ type Victim struct {
 	ShipTypeID    int       `json:"ship_type_id"`
 	DamageTaken   int64     `json:"damage_taken"`
 	Position      *Position `json:"position"`
-	Items         []Item    `json:"items"` // read for value/analysis, never stored
 }
 
 type Position struct {
@@ -38,12 +41,4 @@ type Attacker struct {
 	WeaponTypeID  int   `json:"weapon_type_id"`
 	FinalBlow     bool  `json:"final_blow"`
 	DamageDone    int64 `json:"damage_done"`
-}
-
-type Item struct {
-	ItemTypeID        int   `json:"item_type_id"`
-	Flag              int   `json:"flag"`
-	QuantityDropped   int64 `json:"quantity_dropped"`
-	QuantityDestroyed int64 `json:"quantity_destroyed"`
-	Singleton         int   `json:"singleton"`
 }

@@ -199,9 +199,10 @@ JSONB blob**. R2 dumps are immutable and re-fetchable, so reprocessing (e.g. a n
 field) re-pulls the day rather than reading a local copy. Denormalize the *stable* SDE facts
 (`constellation`/`region`, `space_type`) into the rows; keep the *volatile* classifications
 (`attacker_bucket`, `victim_bucket`) as small join tables so reclassifying is an `UPDATE`,
-never a reprocess. `victim.items` and the full attacker array are read at ingest and dropped
-(items: 54% of dump bytes and unused by lscan; attackers: consumed to emit `kills` rows);
-`victim.position` is kept (`pos_x/y/z`).
+never a reprocess. The full attacker array is read at ingest and consumed to emit `kills`
+rows, then dropped; `victim.items` (54% of dump bytes, unused by lscan) is deliberately
+omitted from the decode struct so the JSON decoder skips it entirely — which roughly halves
+the backfill's per-day memory. `victim.position` is kept (`pos_x/y/z`).
 
 - **Kills** for a character → `kills WHERE character_id = ?` (player-attacker rows).
 - **Losses** → `zkillboard_killmails WHERE victim_char_id = ?` (victim is one row per mail).
