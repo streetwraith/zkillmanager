@@ -3,6 +3,7 @@ Groups:
 	Strategic Cruiser	963
 	Covert Ops	830
 	Force Recon Ship	833
+	Combat Recon Ship	906
 	Stealth Bomber	834
 	Blockade Runner	1202
 	Special Edition Yachts	5087
