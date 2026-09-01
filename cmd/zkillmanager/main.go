@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/getsentry/sentry-go"
 	"github.com/joho/godotenv"
 	"golang.org/x/sync/errgroup"
 
@@ -41,10 +42,67 @@ func main() {
 
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 
+	// Start error reporting before the config loads, so a missing DATABASE_URL is reported.
+	loadEnvFile()
+	initSentry()
+	defer capturePanic("main")
+
 	if err := run(context.Background(), *backfill); err != nil {
 		slog.Error("fatal", "err", err)
+		// A cancelled context here is a SIGTERM during startup, not a fault.
+		if !errors.Is(err, context.Canceled) {
+			sentry.WithScope(func(scope *sentry.Scope) {
+				scope.SetTag("component", "fatal")
+				sentry.CaptureException(err)
+			})
+		}
+		// os.Exit skips deferred calls, so flush here rather than in a defer.
+		sentry.Flush(sentryFlushTimeout)
 		os.Exit(1)
 	}
+	sentry.Flush(sentryFlushTimeout)
+}
+
+// sentryFlushTimeout bounds the wait for buffered events on the way out.
+const sentryFlushTimeout = 2 * time.Second
+
+// initSentry starts error reporting when BUGSINK_DSN is set. An empty DSN keeps local
+// development and CI silent: every sentry call is then a no-op.
+func initSentry() {
+	dsn := os.Getenv("BUGSINK_DSN")
+	if dsn == "" {
+		return
+	}
+	err := sentry.Init(sentry.ClientOptions{
+		Dsn: dsn,
+		// Our errors come from fmt.Errorf and carry no stack of their own.
+		AttachStacktrace: true,
+		Environment:      "production",
+		Release:          os.Getenv("SOURCE_COMMIT"), // Coolify injects it into a git-built container
+	})
+	if err != nil {
+		// A DSN that url.Parse rejects is quoted back inside the error, and a DSN is a
+		// write credential. Never let it reach the log.
+		slog.Error("sentry init failed; check BUGSINK_DSN")
+		return
+	}
+	slog.Info("error reporting enabled")
+}
+
+// capturePanic reports a panic from one of the daemon's goroutines, then re-panics so the
+// process still dies and Coolify restarts it. sentry.Recover swallows the panic instead,
+// which would leave a dead goroutine behind a health check that still passes.
+func capturePanic(component string) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	sentry.WithScope(func(scope *sentry.Scope) {
+		scope.SetTag("component", component)
+		sentry.CurrentHub().Recover(r)
+	})
+	sentry.Flush(sentryFlushTimeout)
+	panic(r)
 }
 
 // healthProbe backs the container HEALTHCHECK. The distroless image has no shell or curl, so
@@ -77,8 +135,6 @@ func healthProbe() int {
 }
 
 func run(ctx context.Context, backfill bool) error {
-	loadEnvFile()
-
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -144,7 +200,7 @@ func run(ctx context.Context, backfill bool) error {
 
 	// Live tail (R2Z2 ephemeral feed; resumes via ingest_state).
 	live := zkill.NewLive(cfg.LiveBaseURL, cfg.UserAgent, ingester, st)
-	g.Go(func() error { return live.Run(ctx) })
+	g.Go(func() error { defer capturePanic("live"); return live.Run(ctx) })
 
 	// One Syncer, shared by the scheduler's reconciliation and the optional backfill
 	// (its TryLock keeps them from overlapping).
@@ -154,10 +210,11 @@ func run(ctx context.Context, backfill bool) error {
 	// Internal scheduler: hourly reconciliation (picks up new/grown dumps), pod pairing, and
 	// retention prune. Pairing goes through the syncer so it never overlaps a bulk day insert.
 	sch := scheduler.New(cfg, syncer, syncer, st, slog.Default())
-	g.Go(func() error { return sch.Run(ctx) })
+	g.Go(func() error { defer capturePanic("scheduler"); return sch.Run(ctx) })
 
 	if backfill || cfg.BackfillOnStart {
 		g.Go(func() error {
+			defer capturePanic("backfill")
 			// A backfill failure must not take the daemon down: the live feed keeps running
 			// and the hourly reconcile fills the same gaps. Log and continue (return nil).
 			n, err := syncer.Sync(ctx, 0) // limit 0 = all gap days

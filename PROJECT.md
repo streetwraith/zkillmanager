@@ -88,6 +88,7 @@ internal/zkill/live.go     # R2Z2 ephemeral live-feed client
 internal/enrich/           # SDE-backed derivations (space_type, region)
 internal/ingest/           # parse -> PvP filter -> enrich -> upsert (killmails + kills)
 internal/scheduler/        # tickers: reconciliation (gap Sync) + retention prune
+internal/sentrytest/       # test-only: records the error events a test's code sends
 migrations/                # *.sql
 Dockerfile
 ```
@@ -95,7 +96,8 @@ Dockerfile
 ### Config (env; Coolify injects)
 `DATABASE_URL`, `HISTORY_BASE_URL`, `LIVE_BASE_URL`, `RETENTION_DAYS`, `USER_AGENT`,
 `BACKFILL_ON_START`, `RECONCILE_INTERVAL` (default `1h`), `PRUNE_INTERVAL` (default `24h`),
-`HTTP_ADDR`.
+`HTTP_ADDR`, `BUGSINK_DSN` (optional; see "Error reporting"), `SOURCE_COMMIT` (Coolify
+injects it into a git-built container; it becomes the Sentry release).
 
 `RETENTION_DAYS` bounds **both** pruning and backfill depth — the backfill never fetches R2
 dumps older than the horizon (no point pulling what prune would drop). Prod runs e.g. 365;
@@ -239,6 +241,39 @@ sec-status/affiliations from ESI.
 **ISK value is unresolved.** ESI killmails (hence the R2 dumps) carry no ISK, so
 `total_value` is not populated. We will *not* compute it locally; it will either be left out
 or fetched from zKill — deferred. Any ISK-efficiency metric depends on that decision.
+
+## Error reporting (Bugsink)
+
+Errors go to the shared Bugsink instance (`https://errors.entropiadev.com`, Sentry-SDK
+compatible) with `github.com/getsentry/sentry-go`, pinned. `BUGSINK_DSN` turns it on; an empty
+DSN makes every SDK call a no-op, so local dev and CI stay silent with no extra config. The
+SDK starts in `main` **before** `config.Load`, so a missing `DATABASE_URL` still produces an
+event. Bugsink holds error events only — tracing is off.
+
+The daemon has no request path and no logging hook, so every event comes from an explicit
+capture. What reports, and what deliberately does not:
+
+| Fault | Reports? | Tags |
+|---|---|---|
+| `run` returns an error (bad config, DB down, migration, missing `sde`) | yes (not on a cancelled context), then exit 1 | `component=fatal` |
+| A panic in the live, scheduler, backfill, or main goroutine | yes, then re-panic so the process still dies | `component=` the goroutine |
+| A scheduler job fails (reconcile / pair pods / prune) | **first failure of a streak only** | `component=scheduler`, `job=` |
+| The live tail cannot ingest a killmail | **first failure of a streak only** | `component=live` |
+| The live tail cannot reach R2Z2 | after `liveStallThreshold` failures in a row (10, about a minute) | `component=live` |
+| A dump is not published yet (404), a 404 at the live head | no — normal operation | |
+| A non-PvP kill, an unclassified system | no — normal operation | |
+| A backfill failure | no — the hourly reconcile is the retry, and it reports | |
+| A cancelled context | no — that is a shutdown | |
+
+**Why the streaks.** A ticker is the retry here, so a failing job would otherwise send one
+event per tick: pod pairing runs every 5 minutes and the live tail about ten times a second.
+One outage must produce one event, so each site reports the first failure and stays quiet
+until the job succeeds again. `capturePanic` re-panics on purpose: `sentry.Recover` swallows
+the panic, which would leave a dead goroutine behind a `/healthz` that still passes, because
+the check only pings Postgres.
+
+The Postgres password cannot leak into an event: `pgconn` redacts it in a parse error, and
+never includes it in a connect error, so no `BeforeSend` scrubber is needed.
 
 ## Deployment (Coolify)
 

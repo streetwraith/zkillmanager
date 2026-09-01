@@ -4,8 +4,11 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
+
+	"github.com/getsentry/sentry-go"
 
 	"zkillmanager/internal/config"
 )
@@ -44,10 +47,41 @@ type Scheduler struct {
 	pruner     Pruner
 	cfg        config.Config
 	log        *slog.Logger
+	// reported names the jobs whose current failure streak already produced an error event.
+	// Run is the only writer, so no lock is needed.
+	reported map[string]bool
 }
 
 func New(cfg config.Config, reconciler Reconciler, pairer PodPairer, pruner Pruner, log *slog.Logger) *Scheduler {
-	return &Scheduler{reconciler: reconciler, pairer: pairer, pruner: pruner, cfg: cfg, log: log}
+	return &Scheduler{
+		reconciler: reconciler,
+		pairer:     pairer,
+		pruner:     pruner,
+		cfg:        cfg,
+		log:        log,
+		reported:   map[string]bool{},
+	}
+}
+
+// note records the outcome of one job run and returns true when the job failed. It logs
+// every failure but reports only the first of a streak: a ticker is the retry here, so a job
+// that keeps failing is one fault, not one per tick. A cancelled context is a shutdown.
+func (s *Scheduler) note(job string, err error) bool {
+	if err == nil {
+		delete(s.reported, job)
+		return false
+	}
+	s.log.Error(job+" failed", "err", err)
+	if errors.Is(err, context.Canceled) || s.reported[job] {
+		return true
+	}
+	s.reported[job] = true
+	sentry.WithScope(func(scope *sentry.Scope) {
+		scope.SetTag("component", "scheduler")
+		scope.SetTag("job", job)
+		sentry.CaptureException(err)
+	})
+	return true
 }
 
 // Run drives reconciliation and prune on their intervals until ctx is cancelled. Job
@@ -84,8 +118,7 @@ func (s *Scheduler) Run(ctx context.Context) error {
 
 func (s *Scheduler) reconcile(ctx context.Context) {
 	n, err := s.reconciler.Sync(ctx, reconcileLimit)
-	if err != nil {
-		s.log.Error("reconcile failed", "err", err)
+	if s.note("reconcile", err) {
 		return
 	}
 	if n > 0 {
@@ -95,8 +128,7 @@ func (s *Scheduler) reconcile(ctx context.Context) {
 
 func (s *Scheduler) pairPods(ctx context.Context) {
 	n, err := s.pairer.PairPods(ctx)
-	if err != nil {
-		s.log.Error("pod pairing failed", "err", err)
+	if s.note("pod pairing", err) {
 		return
 	}
 	if n > 0 {
@@ -106,8 +138,7 @@ func (s *Scheduler) pairPods(ctx context.Context) {
 
 func (s *Scheduler) prune(ctx context.Context) {
 	n, err := s.pruner.PruneOlderThan(ctx, s.cfg.RetentionDays)
-	if err != nil {
-		s.log.Error("prune failed", "err", err)
+	if s.note("prune", err) {
 		return
 	}
 	s.log.Info("pruned", "killmails", n)

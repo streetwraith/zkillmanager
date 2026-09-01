@@ -33,7 +33,7 @@ drops the pod), and a daily retention prune. Design + schema in `PROJECT.md`.
 
 ```
 go build ./...                # compile
-go test ./...                 # unit tests: classification, resolver, PvP/awox, buildRows, live feed
+go test ./...                 # unit tests: classification, resolver, PvP/awox, buildRows, live feed, error reporting
 go run ./cmd/zkillmanager     # requires DATABASE_URL, USER_AGENT
 
 # integration tests hit a real Postgres, read-only:
@@ -49,6 +49,9 @@ precedence), so local dev is just:
 cp .env.example .env         # edit if needed
 go run ./cmd/zkillmanager
 ```
+
+`BUGSINK_DSN` is optional and stays **empty locally**: with no DSN the app makes no error-
+reporting calls. Prod gets it from Coolify. See "Error reporting" in `PROJECT.md`.
 
 Prereq: run `DUMP_SCHEMAS=sde ~/sync-prod-db.sh` first — it creates the local `zkillmanager`
 role + `killmails` schema and loads `sde`. In prod, Coolify injects the same variables (no

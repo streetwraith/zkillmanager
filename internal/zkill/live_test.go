@@ -3,12 +3,15 @@ package zkill
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
+
+	"zkillmanager/internal/sentrytest"
 )
 
 type memStore struct {
@@ -188,4 +191,127 @@ func TestLiveJumpsPastExpiredGap(t *testing.T) {
 	}
 	cancel()
 	<-done
+}
+
+// flakyHandler fails only on the killmail ids in fail, and signals every call.
+type flakyHandler struct {
+	ch   chan int64
+	fail map[int64]bool
+}
+
+func (h flakyHandler) Process(_ context.Context, km Killmail) error {
+	h.ch <- km.KillmailID
+	if h.fail[km.KillmailID] {
+		return errors.New("store unavailable")
+	}
+	return nil
+}
+
+func TestLiveReportsFirstIngestErrorOfStreak(t *testing.T) {
+	sink := sentrytest.Capture(t)
+	srv := r2z2Server(102, map[int64]int64{100: 1000, 101: 1001, 102: 1002})
+	defer srv.Close()
+
+	store := &memStore{m: map[string]string{"live_sequence": "100"}}
+	h := flakyHandler{ch: make(chan int64, 4), fail: map[int64]bool{1000: true, 1001: true, 1002: true}}
+	live := NewLive(srv.URL, "test-ua", h, store)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- live.Run(ctx) }()
+
+	deadline := time.After(5 * time.Second)
+	for range 3 {
+		select {
+		case <-h.ch:
+		case <-deadline:
+			cancel()
+			<-done
+			t.Fatal("timed out waiting for three ingest attempts")
+		}
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run returned %v", err)
+	}
+
+	events := sink.Captured()
+	if len(events) != 1 {
+		t.Fatalf("events for three consecutive ingest failures = %d, want 1", len(events))
+	}
+	if events[0].Tags["component"] != "live" {
+		t.Errorf("event tags = %v, want component=live", events[0].Tags)
+	}
+}
+
+func TestLiveReportsStallOnceAndResetsWhenFeedAnswers(t *testing.T) {
+	sink := sentrytest.Capture(t)
+	// A cursor far behind the head takes the expired-gap branch of onMissing, which returns
+	// at once. The other branches sleep for seconds.
+	srv := r2z2Server(100000, map[int64]int64{})
+	defer srv.Close()
+	live := NewLive(srv.URL, "test-ua", chanHandler{ch: make(chan Killmail, 1)}, &memStore{})
+
+	boom := errors.New("connection refused")
+	for range liveStallThreshold - 1 {
+		live.noteFetch(boom)
+	}
+	if got := len(sink.Captured()); got != 0 {
+		t.Fatalf("events below the threshold = %d, want 0", got)
+	}
+
+	seq := int64(100)
+	if !live.onMissing(context.Background(), &seq) {
+		t.Fatal("onMissing returned false, want the expired-gap jump")
+	}
+
+	for range liveStallThreshold - 1 {
+		live.noteFetch(boom)
+	}
+	if got := len(sink.Captured()); got != 0 {
+		t.Fatalf("events after the feed answered = %d, want 0 (the streak restarts)", got)
+	}
+
+	live.noteFetch(boom) // reaches the threshold
+	live.noteFetch(boom) // still the same stall
+	events := sink.Captured()
+	if len(events) != 1 {
+		t.Fatalf("events for a sustained stall = %d, want 1", len(events))
+	}
+	if events[0].Tags["component"] != "live" {
+		t.Errorf("event tags = %v, want component=live", events[0].Tags)
+	}
+}
+
+func TestLiveReportsAgainAfterAnIngestRecovers(t *testing.T) {
+	sink := sentrytest.Capture(t)
+	srv := r2z2Server(102, map[int64]int64{100: 1000, 101: 1001, 102: 1002})
+	defer srv.Close()
+
+	store := &memStore{m: map[string]string{"live_sequence": "100"}}
+	h := flakyHandler{ch: make(chan int64, 4), fail: map[int64]bool{1000: true, 1002: true}}
+	live := NewLive(srv.URL, "test-ua", h, store)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- live.Run(ctx) }()
+
+	deadline := time.After(5 * time.Second)
+	for range 3 {
+		select {
+		case <-h.ch:
+		case <-deadline:
+			cancel()
+			<-done
+			t.Fatal("timed out waiting for three ingest attempts")
+		}
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run returned %v", err)
+	}
+
+	if got := len(sink.Captured()); got != 2 {
+		t.Fatalf("events for fail/succeed/fail = %d, want 2 (the success ends the streak)", got)
+	}
 }

@@ -3,12 +3,15 @@ package zkill
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/getsentry/sentry-go"
 )
 
 // Handler ingests a live killmail. Defined here (not imported from ingest) so the zkill
@@ -29,6 +32,10 @@ const (
 	liveReqDelay   = 100 * time.Millisecond // ~10 req/s, comfortably under the 15 req/s cap
 	liveErrBackoff = 6 * time.Second
 	liveGapJump    = 500 // if this far behind on a 404, jump to head (expired gap; dumps cover it)
+
+	// liveStallThreshold is how many consecutive failed R2Z2 requests mean the feed is
+	// stalled rather than blipping -- about a minute at liveErrBackoff.
+	liveStallThreshold = 10
 )
 
 // Live tails zKillboard's R2Z2 ephemeral feed -- the replacement for the (sunset) RedisQ.
@@ -40,6 +47,9 @@ type Live struct {
 	handler Handler
 	store   SequenceStore
 	client  *http.Client
+	// Failure streaks for error reporting. Run is the only writer, so no lock is needed.
+	fetchFails   int
+	ingestFailed bool
 }
 
 func NewLive(baseURL, userAgent string, handler Handler, store SequenceStore) *Live {
@@ -69,13 +79,17 @@ func (l *Live) Run(ctx context.Context) error {
 		switch {
 		case err != nil:
 			slog.Warn("live fetch error", "sequence", seq, "err", err)
+			l.noteFetch(err)
 			if !wait(ctx, liveErrBackoff) {
 				return nil
 			}
 		case status == http.StatusOK:
-			if err := l.handler.Process(ctx, km); err != nil {
-				slog.Error("live ingest error", "sequence", seq, "err", err)
+			l.noteFetch(nil)
+			perr := l.handler.Process(ctx, km)
+			if perr != nil {
+				slog.Error("live ingest error", "sequence", seq, "err", perr)
 			}
+			l.noteIngest(seq, perr)
 			seq++
 			l.saveSequence(ctx, seq)
 			if !wait(ctx, liveReqDelay) {
@@ -87,6 +101,7 @@ func (l *Live) Run(ctx context.Context) error {
 			}
 		default:
 			slog.Warn("live unexpected status", "sequence", seq, "status", status)
+			l.noteFetch(fmt.Errorf("live: unexpected status %d", status))
 			if !wait(ctx, liveErrBackoff) {
 				return nil
 			}
@@ -98,6 +113,7 @@ func (l *Live) Run(ctx context.Context) error {
 // expired gap (jump to head). Returns false if ctx was cancelled.
 func (l *Live) onMissing(ctx context.Context, seq *int64) bool {
 	latest, err := l.latest(ctx)
+	l.noteFetch(err)
 	if err != nil {
 		slog.Warn("live sequence.json error", "err", err)
 		return wait(ctx, liveErrBackoff)
@@ -114,6 +130,46 @@ func (l *Live) onMissing(ctx context.Context, seq *int64) bool {
 		*seq++ // a single missing sequence within range
 		return wait(ctx, liveReqDelay)
 	}
+}
+
+// noteFetch records the outcome of one R2Z2 request. It counts consecutive failures and
+// reports once when the run reaches liveStallThreshold. One failed request is normal -- the
+// back-off handles it, so only a sustained stall needs a person.
+func (l *Live) noteFetch(err error) {
+	if err == nil {
+		l.fetchFails = 0
+		return
+	}
+	if errors.Is(err, context.Canceled) {
+		return
+	}
+	l.fetchFails++
+	if l.fetchFails != liveStallThreshold {
+		return
+	}
+	sentry.WithScope(func(scope *sentry.Scope) {
+		scope.SetTag("component", "live")
+		sentry.CaptureException(fmt.Errorf("live feed stalled: %w", err))
+	})
+}
+
+// noteIngest records the outcome of one ingest and reports the first failure of a streak. A
+// broken store fails every sequence, and the loop runs about ten times a second, so one event
+// per streak is the only useful volume.
+func (l *Live) noteIngest(seq int64, err error) {
+	if err == nil {
+		l.ingestFailed = false
+		return
+	}
+	if errors.Is(err, context.Canceled) || l.ingestFailed {
+		return
+	}
+	l.ingestFailed = true
+	sentry.WithScope(func(scope *sentry.Scope) {
+		scope.SetTag("component", "live")
+		scope.SetContext("live", sentry.Context{"sequence": seq})
+		sentry.CaptureException(err)
+	})
 }
 
 // startSequence resumes from the stored cursor, or starts at the current head.
